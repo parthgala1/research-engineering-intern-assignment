@@ -602,7 +602,7 @@ async def explain_sentiment(subreddit_id: str) -> dict:
         {', '.join(f"{k}: {v['count']} ({v['percentage']}%)" for k, v in sentiment_distribution.items())}
 
         Example Posts:
-        {'\n\n'.join(examples)}
+        {examples}
 
         Task: Explain why this subreddit shows a {dominant_sentiment} sentiment trend. 
         Consider the topics discussed, common themes, and user interactions.
