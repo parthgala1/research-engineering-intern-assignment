@@ -74,10 +74,25 @@ async def call_groq_api(prompt: str) -> str:
         return f"Error calling Groq API: {str(e)}"
 
 # Load sentiment analysis model
+# Load models and initialize them before use
 try:
     sentiment_model = pipeline("sentiment-analysis")
+    embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
 except Exception as e:
     raise RuntimeError(f"Error loading model: {e}")
+
+# Move this section up, after the imports and before build_vector_store
+def clean_text(text: str) -> str:
+    """Cleans text by removing URLs and special characters while preserving hashtags and mentions."""
+    text = re.sub(r"http\S+", "", text)  # Remove URLs
+    text = re.sub(r"[^a-zA-Z0-9#@\s]", "", text)  # Preserve hashtags & mentions
+    return text.strip()
+
+tokenizer = AutoTokenizer.from_pretrained("distilbert-base-uncased")
+
+def truncate_text(text):
+    tokenized_input = tokenizer(text, truncation=True, max_length=512, return_tensors="pt")
+    return tokenizer.decode(tokenized_input["input_ids"][0], skip_special_tokens=True)
 
 # Load data from JSONL file
 def load_data(file_path: str) -> pd.DataFrame:
@@ -91,58 +106,21 @@ def load_data(file_path: str) -> pd.DataFrame:
     except Exception as e:
         raise RuntimeError(f"Error loading data: {e}")
 
-data = load_data("data.jsonl")
-
-# Improved text cleaning function
-def clean_text(text: str) -> str:
-    text = re.sub(r"http\S+", "", text)  # Remove URLs
-    text = re.sub(r"[^a-zA-Z0-9#@\s]", "", text)  # Preserve hashtags & mentions
-    return text.strip()
-
-# Load tokenizer
-tokenizer = AutoTokenizer.from_pretrained("distilbert-base-uncased")
-
-def truncate_text(text):
-    tokenized_input = tokenizer(text, truncation=True, max_length=512, return_tensors="pt")
-    return tokenizer.decode(tokenized_input["input_ids"][0], skip_special_tokens=True)
-
-def summarize_text(text: str) -> str:
-    """Returns a basic summary by truncating to the first 100 words."""
-    words = text.split()
-    return " ".join(words[:100]) + "..." if len(words) > 100 else text
-
-def merge_summaries(summaries: list, max_words=800) -> str:
-    """Combines summaries while keeping word count within max_tokens limit."""
-    merged_text = ""
-    total_words = 0
-
-    for summary in summaries:
-        words = summary.split()
-        if total_words + len(words) > max_words:
-            break  # Stop adding more summaries if we exceed max length
-        merged_text += summary + " "
-        total_words += len(words)
-    
-    return merged_text.strip()
-
-# Load embedding model
-embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
-
+# Load the data before building vector store
+df = load_data("./data.jsonl")
 
 # Build Vector Store (FAISS)
-# Remove the mock reddit_posts and update with actual data
 def build_vector_store():
-    dataset = data if isinstance(data, list) else [data]
     posts = []
     embeddings_list = []
     
-    for post in dataset:
-        post_data = post.get("data", {})
-        text = clean_text(post_data.get("selftext", ""))
+    # Use the DataFrame directly
+    for _, row in df.iterrows():
+        text = clean_text(str(row.get('selftext', '')))
         if text.strip():  # Only include non-empty posts
             posts.append({
-                "id": post_data.get("id"),
-                "subreddit": post_data.get("subreddit"),
+                "id": row.get("id"),
+                "subreddit": row.get("subreddit"),
                 "text": text
             })
             embeddings_list.append(embedding_model.encode(text))
@@ -156,8 +134,19 @@ def build_vector_store():
     
     return index, posts
 
-# Initialize vector store with actual data
+# Initialize vector store with DataFrame data
 index, reddit_posts = build_vector_store()
+
+def retrieve_reddit_context(query: str, top_k: int = 2) -> List[Dict[str, Any]]:
+    if not reddit_posts:  # Check if we have any posts
+        return []
+        
+    query_embedding = embedding_model.encode(query)
+    distances, indices = index.search(np.array([query_embedding]), min(top_k, len(reddit_posts)))
+    
+    # Filter out invalid indices and ensure we don't exceed list bounds
+    valid_posts = [reddit_posts[i] for i in indices[0] if 0 <= i < len(reddit_posts)]
+    return valid_posts
 
 # Update the retrieve_reddit_context function
 def retrieve_reddit_context(query: str, top_k: int = 2) -> List[Dict[str, Any]]:
