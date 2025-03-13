@@ -98,7 +98,7 @@ GROQ_API_KEY=your_groq_api_key
 ## Base URL
 
 ```
-http://localhost:5000
+http://localhost:8000
 ```
 
 ## Endpoints
