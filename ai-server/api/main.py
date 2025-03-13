@@ -805,6 +805,9 @@ async def get_top_hashtags():
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/")
+async def root():
+    return {"message": "Welcome to the Reddit API!"}
 
 
 if __name__ == "__main__":
