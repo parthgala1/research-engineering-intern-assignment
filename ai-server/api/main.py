@@ -109,132 +109,22 @@ def load_data(file_path: str) -> pd.DataFrame:
 # Load the data before building vector store
 df = load_data("./data.jsonl")
 
-# Build Vector Store (FAISS)
-def build_vector_store():
-    posts = []
-    embeddings_list = []
-    
-    # Use the DataFrame directly
-    for _, row in df.iterrows():
-        text = clean_text(str(row.get('selftext', '')))
-        if text.strip():  # Only include non-empty posts
-            posts.append({
-                "id": row.get("id"),
-                "subreddit": row.get("subreddit"),
-                "text": text
-            })
-            embeddings_list.append(embedding_model.encode(text))
-    
-    # Build FAISS index
-    d = 384  # Embedding size
-    index = faiss.IndexFlatL2(d)
-    if embeddings_list:
-        embeddings = np.array(embeddings_list)
-        index.add(embeddings)
-    
-    return index, posts
+# Add lazy loading for models
+sentiment_model = None
+embedding_model = None
 
-# Initialize vector store with DataFrame data
-index, reddit_posts = build_vector_store()
+def initialize_models():
+    global sentiment_model, embedding_model
+    if sentiment_model is None:
+        sentiment_model = pipeline("sentiment-analysis", model="distilbert-base-uncased-finetuned-sst-2-english")
+    if embedding_model is None:
+        embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
 
-def retrieve_reddit_context(query: str, top_k: int = 2) -> List[Dict[str, Any]]:
-    if not reddit_posts:  # Check if we have any posts
-        return []
-        
-    query_embedding = embedding_model.encode(query)
-    distances, indices = index.search(np.array([query_embedding]), min(top_k, len(reddit_posts)))
-    
-    # Filter out invalid indices and ensure we don't exceed list bounds
-    valid_posts = [reddit_posts[i] for i in indices[0] if 0 <= i < len(reddit_posts)]
-    return valid_posts
-
-# Update the retrieve_reddit_context function
-def retrieve_reddit_context(query: str, top_k: int = 2) -> List[Dict[str, Any]]:
-    query_embedding = embedding_model.encode(query)
-    distances, indices = index.search(np.array([query_embedding]), top_k)
-    
-    # Filter out invalid indices
-    valid_posts = [reddit_posts[i] for i in indices[0] if i < len(reddit_posts)]
-    return valid_posts
-
-# Update chat endpoint to use actual data
-@app.post("/chat")
-async def chat_with_reddit(request: ChatRequest):
-    relevant_posts = retrieve_reddit_context(request.user_message)
-    retrieved_texts = "\n".join([post["text"] for post in relevant_posts])
-    
-    prompt = f"""
-    You are a chatbot that provides brief, concise responses about social media trends.
-    Keep your responses under 50 words and focus on the key points.
-    
-    Context from similar discussions:
-    {retrieved_texts}
-    
-    User: {request.user_message}
-    Provide a brief response:
-    """
-    
-    try:
-        response = await call_groq_api(prompt)
-        return {"response": response}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-# Pydantic Model for API
-class ChatRequest(BaseModel):
-    user_message: str
-    context: List[str] = []
-
-# Function to retrieve similar posts
-def retrieve_reddit_context(query: str, top_k: int = 2) -> List[Dict[str, Any]]:
-    query_embedding = embedding_model.encode(query)
-    distances, indices = index.search(np.array([query_embedding]), top_k)
-    return [reddit_posts[i] for i in indices[0] if i < len(reddit_posts)]
-
-
-async def call_groq_api(prompt: str) -> str:
-    """Calls the Groq API with the legal analysis prompt."""
-    headers = {
-        "Authorization": f"Bearer {GROQ_API_KEY}",
-        "Content-Type": "application/json",
-        "Accept": "application/json"
-    }
-    payload = {
-        "model": "mixtral-8x7b-32768",
-        "messages": [
-            {"role": "system", "content": "You are a chatbot specialized in analyzing and discussing social media trends and Reddit content."},
-            {"role": "user", "content": prompt}
-        ],
-        "temperature": 0.7,
-        "max_tokens": 1024,
-        "top_p": 1,
-        "stream": False
-    }
-
-    try:
-        ssl_context = ssl.create_default_context()
-        ssl_context.check_hostname = False
-        ssl_context.verify_mode = ssl.CERT_NONE
-        
-        connector = aiohttp.TCPConnector(ssl=ssl_context)
-        async with aiohttp.ClientSession(connector=connector) as session:
-            async with session.post(GROQ_API_URL, headers=headers, json=payload) as resp:
-                response_json = await resp.json()
-                
-                if "error" in response_json:
-                    return f"API Error: {response_json['error'].get('message', 'Unknown error')}"
-                
-                if "choices" in response_json and len(response_json["choices"]) > 0:
-                    message = response_json["choices"][0].get("message", {})
-                    return message.get("content", "No response content available.")
-                
-                return "Failed to get a valid response from the API."
-    except Exception as e:
-        return f"Error calling Groq API: {str(e)}"
-
+# Modify the sentiment analysis endpoints to load models on demand
 @app.get("/sentiment/all")
 def get_all_sentiments():
     try:
+        initialize_models()  # Load models when needed
         # Use vectorized operations instead of loop
         filtered_df = df.copy()
         
@@ -291,6 +181,7 @@ def get_all_sentiments():
 @app.get("/sentiment/{post_id}")
 def get_sentiment_by_id(post_id: str):
     try:
+        initialize_models()  # Load models when needed
         # Find post in DataFrame
         post = df[df['subreddit'] == post_id]
         
